@@ -26,6 +26,45 @@ logging.getLogger("ultralytics").setLevel(logging.ERROR)
 
 import glob
 
+def remove_accents(input_str):
+    if not isinstance(input_str, str): return str(input_str)
+    # Thêm dòng replace này ngay đầu hàm
+    s = input_str.replace('đ', 'd').replace('Đ', 'D') 
+    nfkd_form = unicodedata.normalize('NFKD', s)
+    return "".join([c for c in nfkd_form if not unicodedata.combining(c)])
+def get_brand_logo(car_name):
+    if not isinstance(car_name, str): return ""
+    brand = car_name.split(' ')[0].lower()
+    logos = {
+        "maruti": "https://upload.wikimedia.org/wikipedia/en/d/d0/Maruti_Old_Logo.JPG",
+        "hyundai": "https://upload.wikimedia.org/wikipedia/commons/4/44/Hyundai_Motor_Company_logo.svg",
+        "honda": "https://upload.wikimedia.org/wikipedia/commons/7/7b/Honda_Logo.svg",
+        "toyota": "https://upload.wikimedia.org/wikipedia/commons/9/9d/Toyota_carlogo.svg",
+        "ford": "https://upload.wikimedia.org/wikipedia/commons/3/3e/Ford_logo_flat.svg",
+        "chevrolet": "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1e/Chevrolet-logo.png/330px-Chevrolet-logo.png",
+        "audi": "https://upload.wikimedia.org/wikipedia/commons/9/92/Audi-Logo_2016.svg",
+        "bmw": "https://upload.wikimedia.org/wikipedia/commons/4/44/BMW.svg",
+        "kia": "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b6/KIA_logo3.svg/250px-KIA_logo3.svg.png",
+        "mahindra": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/89/Mahindra_logo.svg/500px-Mahindra_logo.svg.png",
+        "tata": "https://upload.wikimedia.org/wikipedia/commons/8/8e/Tata_logo.svg"
+    }
+    return logos.get(brand, "https://cdn-icons-png.flaticon.com/512/741/741407.png")
+
+def detect_color(image):
+    try:
+        img = np.array(image); img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        h, w, _ = img.shape
+        center_img = img[int(h*0.3):int(h*0.7), int(w*0.3):int(w*0.7)]
+        if center_img.size == 0: return "Màu Khác"
+        clt = KMeans(n_clusters=1); clt.fit(center_img.reshape((-1, 3)))
+        b, g, r = clt.cluster_centers_[0]
+        if r>200 and g>200 and b>200: return "Trắng"
+        if r<50 and g<50 and b<50: return "Đen"
+        if abs(r-g)<20 and r>100: return "Bạc/Xám"
+        if r>150 and g<100: return "Đỏ"
+        return "Màu Khác"
+    except Exception: return "Màu Khác"
+
 def cleanup_old_images(folder=".", prefix="temp_car_", max_age_seconds=300):
     # Tìm các file ảnh tạm có tuổi đời hơn 5 phút (300s)
     now = time.time()
@@ -40,12 +79,40 @@ st.set_page_config(page_title="AutoVision Ultimate", page_icon="🏎️", layout
 
 st.markdown("""
     <style>
-    .main {background-color: #0e1117;}
-    .metric-card {background-color: #262730; border: 1px solid #41444e; border-radius: 10px; padding: 15px; margin-bottom: 10px;}
-    .stButton>button {background: linear-gradient(90deg, #FF4B2B 0%, #FF416C 100%); color: white; border-radius: 8px; font-weight: bold; height: 50px; font-size: 18px;}
-    .big-price {font-size: 50px; font-weight: bold; color: #4ade80;}
-    .error-text {color: #ff4b4b; font-weight: bold;}
-    .login-header {text-align: center; color: #FF4B2B; font-size: 30px; font-weight: bold; margin-bottom: 20px;}
+    /* Card thông số: Dùng rgba để tự sáng/tối theo nền */
+    .metric-card {
+        background-color: rgba(150, 150, 150, 0.1); 
+        border: 1px solid rgba(150, 150, 150, 0.2);
+        border-radius: 12px; 
+        padding: 20px; 
+        margin-bottom: 15px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+    }
+    /* Nút bấm: Giữ màu Gradient nhưng thêm hiệu ứng hover cho xịn */
+    .stButton>button {
+        background: linear-gradient(90deg, #FF4B2B 0%, #FF416C 100%); 
+        color: white; 
+        border-radius: 8px; 
+        font-weight: bold; 
+        height: 50px; 
+        border: none;
+        transition: 0.3s;
+    }
+    .stButton>button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 5px 15px rgba(255, 65, 108, 0.3);
+    }
+    /* Header: Dùng Gradient text thay vì màu cố định */
+    .login-header {
+        text-align: center; 
+        background: linear-gradient(90deg, #FF4B2B, #FF416C);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-size: 35px; 
+        font-weight: bold; 
+        margin-bottom: 20px;
+    }
+    .big-price {font-size: 55px; font-weight: 900; color: #4ade80; text-align: center;}
     </style>
     """, unsafe_allow_html=True)
 
@@ -192,12 +259,6 @@ if st.session_state.user_role == 'admin':
 # ==========================================
 # 6. APP ĐỊNH GIÁ & XỬ LÝ PDF (ĐÃ CẬP NHẬT)
 # ==========================================
-def remove_accents(input_str):
-    if not isinstance(input_str, str): return str(input_str)
-    # Thêm dòng replace này ngay đầu hàm
-    s = input_str.replace('đ', 'd').replace('Đ', 'D') 
-    nfkd_form = unicodedata.normalize('NFKD', s)
-    return "".join([c for c in nfkd_form if not unicodedata.combining(c)])
 
 def create_pdf(car_info, final_price, damages, image_path=None):
     # Cập nhật sử dụng fpdf2 để xuất file ổn định hơn
@@ -249,39 +310,6 @@ def create_pdf(car_info, final_price, damages, image_path=None):
     pdf.cell(0, 15, txt=f"TONG GIA TRI DINH GIA: {final_price:,.0f} VND", border=1, ln=True, align='C', fill=True)
     
     return pdf.output()
-
-def get_brand_logo(car_name):
-    if not isinstance(car_name, str): return ""
-    brand = car_name.split(' ')[0].lower()
-    logos = {
-        "maruti": "https://upload.wikimedia.org/wikipedia/en/d/d0/Maruti_Old_Logo.JPG",
-        "hyundai": "https://upload.wikimedia.org/wikipedia/commons/4/44/Hyundai_Motor_Company_logo.svg",
-        "honda": "https://upload.wikimedia.org/wikipedia/commons/7/7b/Honda_Logo.svg",
-        "toyota": "https://upload.wikimedia.org/wikipedia/commons/9/9d/Toyota_carlogo.svg",
-        "ford": "https://upload.wikimedia.org/wikipedia/commons/3/3e/Ford_logo_flat.svg",
-        "chevrolet": "https://upload.wikimedia.org/wikipedia/commons/thumb/1/1e/Chevrolet-logo.png/330px-Chevrolet-logo.png",
-        "audi": "https://upload.wikimedia.org/wikipedia/commons/9/92/Audi-Logo_2016.svg",
-        "bmw": "https://upload.wikimedia.org/wikipedia/commons/4/44/BMW.svg",
-        "kia": "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b6/KIA_logo3.svg/250px-KIA_logo3.svg.png",
-        "mahindra": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/89/Mahindra_logo.svg/500px-Mahindra_logo.svg.png",
-        "tata": "https://upload.wikimedia.org/wikipedia/commons/8/8e/Tata_logo.svg"
-    }
-    return logos.get(brand, "https://cdn-icons-png.flaticon.com/512/741/741407.png")
-
-def detect_color(image):
-    try:
-        img = np.array(image); img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-        h, w, _ = img.shape
-        center_img = img[int(h*0.3):int(h*0.7), int(w*0.3):int(w*0.7)]
-        if center_img.size == 0: return "Màu Khác"
-        clt = KMeans(n_clusters=1); clt.fit(center_img.reshape((-1, 3)))
-        b, g, r = clt.cluster_centers_[0]
-        if r>200 and g>200 and b>200: return "Trắng"
-        if r<50 and g<50 and b<50: return "Đen"
-        if abs(r-g)<20 and r>100: return "Bạc/Xám"
-        if r>150 and g<100: return "Đỏ"
-        return "Màu Khác"
-    except Exception: return "Màu Khác"
 
 @st.cache_data
 def load_data():
