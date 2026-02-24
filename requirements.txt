@@ -7,3 +7,5 @@ ultralytics
 opencv-python-headless
 scikit-learn
 fpdf2
+easyocr
+google-generativeai

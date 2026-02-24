@@ -25,6 +25,9 @@ os.environ["STREAMLIT_SILENCE_WATCHDOG_WARNING"] = "1"
 logging.getLogger("ultralytics").setLevel(logging.ERROR)
 
 import glob
+import easyocr
+import google.generativeai as genai
+import re
 
 def remove_accents(input_str):
     if not isinstance(input_str, str): return str(input_str)
@@ -182,6 +185,7 @@ if 'pdf_image_path' not in st.session_state: st.session_state.pdf_image_path = N
 if 'box_status_val' not in st.session_state: st.session_state.box_status_val = "Không lỗi (Hoàn hảo)"
 if 'box_color_val' not in st.session_state: st.session_state.box_color_val = "Trắng"
 if 'file_uploader_key' not in st.session_state: st.session_state.file_uploader_key = 0
+if 'plate_number' not in st.session_state: st.session_state.plate_number = ""
 
 # ==========================================
 # 4. ĐĂNG NHẬP
@@ -224,6 +228,7 @@ with st.sidebar:
         st.session_state.box_status_val = "Không lỗi (Hoàn hảo)"
         st.session_state.box_color_val = "Trắng"
         st.session_state.pdf_image_path = None
+        st.session_state.plate_number = ""
         if 'ai_image' in st.session_state: del st.session_state['ai_image']
         st.session_state.file_uploader_key += 1
         st.rerun()
@@ -318,6 +323,16 @@ def load_data():
 df = load_data()
 car_options = sorted(df['name'].unique().tolist()) if not df.empty else []
 
+# --- THÊM MODEL OCR ---
+@st.cache_resource
+def load_ocr():
+    try: 
+        # Chỉ dùng tiếng Anh ('en') là đủ đọc biển số, tắt GPU để chạy mượt trên server free
+        return easyocr.Reader(['en'], gpu=False) 
+    except Exception: 
+        return None
+ocr_reader = load_ocr()
+
 @st.cache_resource
 def load_ai():
     p_model = None; y_model = None; cols = []
@@ -333,7 +348,7 @@ price_model, model_cols, damage_model = load_ai()
 
 st.title("🏎️ AUTOVISION ULTIMATE")
 
-tab1, tab2, tab3 = st.tabs(["🔍 ĐỊNH GIÁ & SOI XE", "📊 BÁO CÁO & TRẢ GÓP", "🏆 TOP 10 XE NGON"])
+tab1, tab2, tab3, tab4 = st.tabs(["🔍 ĐỊNH GIÁ & SOI XE", "📊 BÁO CÁO & TRẢ GÓP", "🏆 TOP 10 XE NGON", "🤖 AI TƯ VẤN"])
 
 with tab1:
     colL, colR = st.columns([1, 1.3], gap="large")
@@ -353,7 +368,7 @@ with tab1:
             seats = st.selectbox("Số ghế:", [4, 5, 7, 8], index=1)
             max_power = st.number_input("Mã lực (bhp):", 20.0, 500.0, 80.0)
         st.markdown("---")
-        plate = st.text_input("💎 Biển số (VD: 51G-999.99):")
+        plate = st.text_input("💎 Biển số (VD: 51G-999.99):", value=st.session_state.plate_number)
         st.markdown('</div>', unsafe_allow_html=True)
 
     with colR:
@@ -420,6 +435,66 @@ with tab1:
                                 st.session_state.box_status_val = "Móp méo"
                             else:
                                 st.session_state.box_status_val = "Trầy xước nhẹ"
+                                # --- TÍNH NĂNG MỚI: QUÉT BIỂN SỐ BẰNG EASYOCR (TỪ ẢNH GỐC) ---
+                            if ocr_reader:
+                                st.toast("🤖 Đang đọc biển số từ ảnh gốc...")
+                                try:
+                                    # CHUẨN LUÔN: Lấy biến 'img' (ảnh gốc từ file uploader) để đọc, không bị dính chữ của YOLO
+                                    img_np = np.array(img) 
+                                    img_cv = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+                                    
+                                    # Tiền xử lý cho rõ chữ: Phóng to x2 và chuyển sang trắng đen
+                                    img_cv = cv2.resize(img_cv, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+                                    gray_img = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+                                    
+                                    # Tiến hành đọc chữ
+                                    text_list = ocr_reader.readtext(gray_img, detail=0)
+                                    
+                                    valid_parts = []
+                                    for text in text_list:
+                                        # Giữ lại toàn bộ CHỮ CÁI và CON SỐ
+                                        clean_text = "".join(e for e in text if e.isalnum()).upper()
+                                        if len(clean_text) >= 2:
+                                            valid_parts.append(clean_text)
+                                            
+                                    if valid_parts:
+                                        raw_plate = "".join(valid_parts)
+                                        
+                                        # Cắt bớt nếu nó lỡ đọc luôn số hotline trên tường
+                                        if len(raw_plate) > 12:
+                                            raw_plate = max(valid_parts, key=len) 
+                                            
+                                        # BỘ LỌC ĐẶC BIỆT: Ép ký tự thứ 3 thành CHỮ (Sửa lỗi 374 -> 37A)
+                                        raw_plate_list = list(raw_plate)
+                                        if len(raw_plate_list) >= 5:
+                                            fix_dict = {'4': 'A', '8': 'B', '0': 'D', '5': 'S', '2': 'Z', '6': 'G', '7': 'T'}
+                                            # Vị trí thứ 3 (index 2) trong biển số VN thường là chữ
+                                            if raw_plate_list[2] in fix_dict:
+                                                raw_plate_list[2] = fix_dict[raw_plate_list[2]]
+                                        raw_plate = "".join(raw_plate_list)
+                                        
+                                        # TỰ ĐỘNG FORMAT CHÈN DẤU (-) VÀ DẤU (.)
+                                        formatted_plate = raw_plate
+                                        # Regex bóc tách biển số VN: (2 số đầu + 1 chữ + có thể 1 số) và (4 hoặc 5 số cuối)
+                                        match = re.match(r'^(\d{2}[A-Z]\d?)(\d{4,5})$', raw_plate)
+                                        if match:
+                                            head = match.group(1)
+                                            tail = match.group(2)
+                                            if len(tail) == 5:
+                                                formatted_plate = f"{head}-{tail[:3]}.{tail[3:]}" # VD: 37A-718.60
+                                            else:
+                                                formatted_plate = f"{head}-{tail}" # VD: 29A-1234
+                                                
+                                        if len(formatted_plate) >= 4:
+                                            st.session_state.plate_number = formatted_plate
+                                            st.rerun() # Refresh để tự động điền số
+                                        else:
+                                            st.toast("⚠️ Tìm thấy chữ nhưng không giống biển số xe lắm!")
+                                    else:
+                                        st.toast("⚠️ Không thấy biển số trong ảnh gốc!")
+                                        
+                                except Exception as e:
+                                    st.toast(f"Lỗi quét ảnh: {e}")
                         else: st.warning("Chưa có Model AI.")
                     except Exception: pass
 
@@ -480,6 +555,56 @@ with tab1:
             col2.success(f"💎 Biển số: +{plate_bonus:,.0f}")
             if final_dmg_cost > 0: col3.error(f"📉 {manual_status}: -{final_dmg_cost:,.0f}")
             else: col3.success("✅ Xe đẹp, không trừ tiền")
+            # --- TÍNH NĂNG MỚI: BIỂU ĐỒ DỰ BÁO MẤT GIÁ (CẬP NHẬT THEO NĂM THỰC TẾ) ---
+            st.markdown("---")
+            st.markdown("<h4 style='text-align: center; color: #facc15;'>📉 DỰ BÁO KHẤU HAO GIÁ TRỊ XE TRONG 5 NĂM TỚI</h4>", unsafe_allow_html=True)
+            
+            # Lấy năm hiện tại tự động (Ví dụ: 2026)
+            current_yr = datetime.now().year
+
+            
+            predicted_prices = [final_price]
+            years_list = [str(current_yr)]
+            for y in range(1, 6):
+                # Tạo dữ liệu ảo cho tương lai (Tuổi xe tăng lên, Odo tăng trung bình 15.000km/năm)
+                future_df = pd.DataFrame([{
+                    'year': year, 
+                    'km_driven': km + (15000 * y), 
+                    'fuel': fuel, 'seller_type': seller,
+                    'transmission': trans, 'owner': owner, 
+                    'mileage(km/ltr/kg)': 20.0,
+                    'engine': 1248, 'max_power': max_power, 'seats': seats,
+                    'no_year': (current_yr - year) + y 
+                }])
+                
+                # Format dữ liệu chuẩn với mô hình AI
+                future_df = pd.get_dummies(future_df).reindex(columns=model_cols, fill_value=0)
+                
+                # Dự đoán giá gốc
+                future_base_price = price_model.predict(future_df)[0] * 300
+                
+                # Tính giá cuối cùng (vẫn trừ đi lỗi ngoại thất và cộng biển số/màu sắc ban đầu)
+                future_final_price = future_base_price - final_dmg_cost + plate_bonus + color_bonus
+                
+                # Đảm bảo giá không bị rớt thê thảm xuống số âm
+                predicted_prices.append(max(future_final_price, 50000000))
+
+                years_list.append(str(current_yr + y))
+                
+            # Đóng gói dữ liệu thành bảng để vẽ biểu đồ
+            chart_data = pd.DataFrame({
+                "Giá trị dự kiến (VNĐ)": predicted_prices
+            }, index=years_list)
+            
+            # Vẽ biểu đồ đường
+            st.line_chart(chart_data)
+            
+            # Nhận xét tự động
+            loss_after_5_years = final_price - predicted_prices[-1]
+            if loss_after_5_years > 0:
+                st.info(f"💡 Dựa trên phân tích AI, ước tính đến năm **{current_yr + 5}** (kèm {15000*5:,} km sử dụng thêm), xe sẽ mất giá khoảng **{loss_after_5_years:,.0f} VNĐ**.")
+            else:
+                st.info("💡 Xe đang giữ giá rất tốt theo dự báo của AI!")
         else: st.error("Lỗi Model!")
 
 with tab2:
@@ -518,3 +643,79 @@ with tab3:
                     c2.write(f"**{row['name']}** ({row['year']})")
                     c3.success(f"{row['price_vnd']:,.0f} VND")
                     st.divider()
+with tab4:
+    st.header("🤖 Cố Vấn AI Chuyên Sâu")
+    st.caption("Hãy hỏi tôi bất kỳ điều gì về chiếc xe bạn vừa định giá!")
+    
+    # ⚠️ NÍ SỬA DÒNG NÀY: Thay chữ "ĐIỀN_API_KEY_CỦA_NÍ_VÀO_ĐÂY" bằng Key thật của ní
+    MY_SECRET_KEY = "AIzaSyBK2wECHOo77KpUAHk_llx32PhQUp5NI38"
+    
+    if MY_SECRET_KEY == "ĐIỀN_API_KEY_CỦA_NÍ_VÀO_ĐÂY":
+        st.warning("Bạn là admin: Vui lòng mở code ra và thay 'MY_SECRET_KEY' bằng mã API thật để chatbot hoạt động nhé!")
+    else:
+        genai.configure(api_key=MY_SECRET_KEY)
+        
+        # Chỉ cho phép chat nếu đã định giá (có giá trị > 0)
+        if st.session_state.final_price > 0:
+            
+            # Khởi tạo biến lưu tin nhắn nếu chưa có
+            if 'chat_messages' not in st.session_state:
+                st.session_state.chat_messages = []
+                
+            # TẠO KHUNG CHAT CỐ ĐỊNH CHIỀU CAO ĐỂ KHÔNG BỊ TRÔI Ô INPUT
+            chat_container = st.container(height=450)
+            
+            with chat_container:
+                for msg in st.session_state.chat_messages:
+                    with st.chat_message(msg["role"]):
+                        st.markdown(msg["content"])
+                    
+            if prompt := st.chat_input("Ví dụ: Tại sao xe này lại có giá đó?"):
+                st.session_state.chat_messages.append({"role": "user", "content": prompt})
+                # In ngay câu hỏi của user vào khung chat cuộn
+                with chat_container:
+                    with st.chat_message("user"):
+                        st.markdown(prompt)
+                    
+                system_instruction = f"""
+                Bạn là chuyên gia thẩm định xe hơi 15 năm kinh nghiệm.
+                Thông tin chiếc xe hiện tại người dùng đang hỏi:
+                - Dòng xe: {name}
+                - Năm sản xuất: {year}
+                - Số Odo: {km} km
+                - Tình trạng hư hỏng: {st.session_state.box_status_val}
+                - Biển số: {plate if plate else 'Chưa cung cấp'}
+                - Giá hệ thống vừa dự đoán: {st.session_state.final_price:,.0f} VNĐ.
+                
+                Nhiệm vụ bắt buộc:
+                1. Trả lời bằng tiếng Việt.
+                2. LUÔN TRÌNH BÀY DẠNG BULLET POINT khi giải thích lý do vì sao xe có mức giá đó.
+                3. Nếu có biển số, nhận biết nó thuộc tỉnh thành nào và phân tích.
+                4. Đưa ra gợi ý MUA hay BÁN dựa trên giá hiện tại.
+                """
+                
+                # In câu trả lời của AI vào khung chat cuộn
+                with chat_container:
+                    with st.chat_message("assistant"):
+                        with st.spinner("Đang phân tích dữ liệu xe..."):
+                            try:
+                                # Dùng gemini-pro (ổn định nhất, không bị lỗi 404)
+                                model = genai.GenerativeModel("gemini-3-flash-preview")
+                                
+                                gemini_history = []
+                                for m in st.session_state.chat_messages[:-1]: 
+                                    role = "model" if m["role"] == "assistant" else "user"
+                                    gemini_history.append({"role": role, "parts": [m["content"]]})
+                                    
+                                chat = model.start_chat(history=gemini_history)
+                                
+                                # Gộp System Prompt vào câu hỏi để con gemini-pro tuân thủ luật
+                                full_prompt = f"[HƯỚNG DẪN DÀNH CHO AI]:\n{system_instruction}\n\n[CÂU HỎI CỦA NGƯỜI DÙNG]:\n{prompt}"
+                                
+                                response = chat.send_message(full_prompt)
+                                st.markdown(response.text)
+                                st.session_state.chat_messages.append({"role": "assistant", "content": response.text})
+                            except Exception as e:
+                                st.error(f"Lỗi gọi API: {e}.")
+        else:
+            st.info("⚠️ Vui lòng thực hiện thao tác 'ĐỊNH GIÁ XE' ở Tab 1 trước khi nhờ AI tư vấn nhé!")
