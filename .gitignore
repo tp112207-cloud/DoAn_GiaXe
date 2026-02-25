@@ -8,8 +8,9 @@
 /phantich.ipynb
 /runs
 /run_model.py
-/temp_car_1771828843.jpg
+/temp_*.jpg
 /train_all_models.py
 /train_yolo.py
 /yolov8n.pt
 /__pycache__
+.streamlit/secrets.toml

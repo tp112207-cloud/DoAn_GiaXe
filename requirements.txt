@@ -9,3 +9,5 @@ scikit-learn
 fpdf2
 easyocr
 google-generativeai
+openpyxl
+plotly
